@@ -1,0 +1,2 @@
+As logos serão fornecidas pelo usuário via upload no app
+ou colocadas manualmente nesta pasta (logo.png).
