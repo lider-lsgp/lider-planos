@@ -37,6 +37,22 @@ from .utils import (
 from .empresas import EMPRESAS, empresa_por_contrato
 
 
+
+def _descobrir_ccusto_adm(dominio_df: pd.DataFrame) -> str:
+    """
+    Descobre o CCusto ADM (posto código 1) da empresa a partir do Domínio.
+    Convencionalmente o código 1 do nome_quebra é a sede/ADM
+    (ex.: '1 - LIDER LIMPE LIMPEZA COMERCIAL LTDA').
+    """
+    if dominio_df is None or dominio_df.empty or "nome_quebra" not in dominio_df.columns:
+        return ""
+    for nq in dominio_df["nome_quebra"].dropna().astype(str):
+        nq_strip = nq.strip()
+        if nq_strip.startswith("1 -") or nq_strip.startswith("1 –") or nq_strip.startswith("1-"):
+            return nq_strip
+    return ""
+
+
 CONTRATO_TIPO = {
     "5957": ("SAUDE (AMBULATORIAL)", "Unimed - Saúde (Ambulatorial)"),
     "6040": ("SAUDE (SANTAS)",       "Unimed - Saúde (Santas)"),
@@ -92,7 +108,15 @@ def montar_relatorio_saude(saude: dict, dominio_df: pd.DataFrame, empresa_chave:
             if cpf and nq and cpf not in mapa_ccusto:
                 mapa_ccusto[cpf] = nq
 
-    df["CCUSTO"] = df["CPFTITULAR"].map(mapa_ccusto).fillna("")
+        df["CCUSTO"] = df["CPFTITULAR"].map(mapa_ccusto).fillna("")
+
+    # Fallback PJ: titulares sem CCusto (não estão no Domínio) vão para o
+    # CCusto ADM da empresa (posto código 1).
+    ccusto_adm = _descobrir_ccusto_adm(dominio_df)
+    if ccusto_adm:
+        mask_pj = (df["CCUSTO"].astype(str).str.strip() == "") & \
+                  (df["CPFTITULAR"].astype(str).str.strip() != "")
+        df.loc[mask_pj, "CCUSTO"] = ccusto_adm
 
     # Resumo: por CCusto, somando VLFATURADO (inclui negativos)
     resumo = (
