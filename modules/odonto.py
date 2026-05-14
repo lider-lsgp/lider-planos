@@ -130,7 +130,10 @@ def carregar_relatorio_odonto(file_like, nome_arquivo: str = "") -> dict:
 def montar_relatorio_odonto(odonto: dict, dominio_df: pd.DataFrame) -> dict:
     """
     Cruza Odonto com Domínio via CPF do TITULAR (Tipo='T') para puxar CCusto.
-    Resumo por CCusto soma "Mensalidade" (que é o que efetivamente é cobrado).
+    Resumo por CCusto soma "Total Família" (valor cheio incluindo dependentes).
+
+    Regra de PJ: titulares que aparecem no Odonto mas NÃO estão no Domínio
+    (PJs) vão para o CCusto ADM da empresa (posto código 1).
     """
     df = odonto["df"].copy()
 
@@ -153,20 +156,37 @@ def montar_relatorio_odonto(odonto: dict, dominio_df: pd.DataFrame) -> dict:
 
     df["CCUSTO"] = df["__CPF_TITULAR"].map(mapa_ccusto).fillna("")
 
-    # Para o resumo: soma Mensalidade (valor real) por CCusto
-    valor_col = "Mensalidade_num" if "Mensalidade_num" in df.columns else "TotalFamilia_num"
-    resumo = (
-        df.groupby("CCUSTO", dropna=False, sort=False)[valor_col]
-        .sum()
-        .reset_index()
-        .rename(columns={"CCUSTO": "CCusto", valor_col: "Valor"})
-    )
-    resumo = resumo[resumo["CCusto"].astype(str).str.strip() != ""]
-    resumo = resumo[resumo["Valor"].round(2) != 0.0]
-    resumo["__cod"] = resumo["CCusto"].apply(codigo_nome_quebra)
-    resumo = resumo.sort_values(["__cod", "CCusto"]).drop(columns="__cod").reset_index(drop=True)
+    # Fallback PJ: quem não tem CCusto (não está no Domínio) -> CCusto ADM da empresa
+    ccusto_adm = _descobrir_ccusto_adm(dominio_df)
+    if ccusto_adm:
+        df["__EH_PJ"] = df["CCUSTO"].astype(str).str.strip() == ""
+        # Só aplica em linhas que têm CPF de titular preenchido (evita lixo)
+        mask_pj = df["__EH_PJ"] & df["__CPF_TITULAR"].astype(str).str.strip().ne("")
+        df.loc[mask_pj, "CCUSTO"] = ccusto_adm
 
-    valor_total = float(round(resumo["Valor"].sum(), 2))
+    # Resumo: usa Total Família (valor cheio do boleto, incluindo dependentes)
+    if "TotalFamilia_num" in df.columns:
+        valor_col = "TotalFamilia_num"
+    elif "Mensalidade_num" in df.columns:
+        valor_col = "Mensalidade_num"
+    else:
+        valor_col = None
+
+    if valor_col is None:
+        resumo = pd.DataFrame(columns=["CCusto", "Valor"])
+        valor_total = 0.0
+    else:
+        resumo = (
+            df.groupby("CCUSTO", dropna=False, sort=False)[valor_col]
+            .sum()
+            .reset_index()
+            .rename(columns={"CCUSTO": "CCusto", valor_col: "Valor"})
+        )
+        resumo = resumo[resumo["CCusto"].astype(str).str.strip() != ""]
+        resumo = resumo[resumo["Valor"].round(2) != 0.0]
+        resumo["__cod"] = resumo["CCusto"].apply(codigo_nome_quebra)
+        resumo = resumo.sort_values(["__cod", "CCusto"]).drop(columns="__cod").reset_index(drop=True)
+        valor_total = float(round(resumo["Valor"].sum(), 2))
 
     return {
         "detalhe": df,
@@ -177,6 +197,21 @@ def montar_relatorio_odonto(odonto: dict, dominio_df: pd.DataFrame) -> dict:
         "tipo_longo": "Unimed - Odonto",
         "fatura": odonto.get("fatura", ""),
     }
+
+
+def _descobrir_ccusto_adm(dominio_df: pd.DataFrame) -> str:
+    """
+    Descobre o CCusto ADM (posto código 1) da empresa a partir do Domínio.
+    Convencionalmente o código 1 do nome_quebra é a sede/ADM
+    (ex.: '1 - LIDER LIMPE LIMPEZA COMERCIAL LTDA').
+    """
+    if dominio_df is None or dominio_df.empty or "nome_quebra" not in dominio_df.columns:
+        return ""
+    for nq in dominio_df["nome_quebra"].dropna().astype(str):
+        nq_strip = nq.strip()
+        if nq_strip.startswith("1 -") or nq_strip.startswith("1 –") or nq_strip.startswith("1-"):
+            return nq_strip
+    return ""
 
 
 def formatar_valor_br(v: float) -> str:
