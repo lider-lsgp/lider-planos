@@ -105,13 +105,20 @@ def classificar_arquivo(nome: str, pasta_pai: str = "") -> str:
             if "GERAL" in base or base.startswith("ATIVA ") or " ATIVA" in base:
                 return "DOMINIO"
 
-    # 5) SAÚDE Unimed (relatórios)
+        # 5) SAÚDE Unimed (relatórios)
     if base.endswith(".XLS") or base.endswith(".XLSX"):
-        if ("SAUDE" in base or "SAÚDE" in base or "EXTRATO" in base or
-            "RELAÇÃO" in base or "RELACAO" in base) and "ODONTO" not in base:
-            return "SAUDE"
+        if "ODONTO" not in base:
+            # Palavras-chave que indicam relatório de saúde da Unimed
+            palavras_saude = (
+                "SAUDE", "SAÚDE", "EXTRATO", "RELAÇÃO", "RELACAO",
+                "RELATORIO", "RELATÓRIO", "RELATIVO",   # typos comuns
+                "AMBULATORIAL", "SANTAS", "INTERIOR", "METROPOLITANO",
+            )
+            if any(p in base for p in palavras_saude):
+                return "SAUDE"
 
     return "DESCONHECIDO"
+
 
 
 def detectar_empresa_arquivo(nome: str, pasta_pai: str = "") -> Optional[str]:
@@ -291,9 +298,13 @@ def processar_uploads(uploads: list, modelos: Optional[dict] = None) -> dict:
             dados_ccusto.setdefault(emp, {})
             dados_ccusto[emp]["ODONTO"] = payload
 
-        # 4. VSP SAMP
+                # 4. VSP SAMP
         if emp == "VSP" and info["samp_boletos"]:
+            # Antes de consolidar: tentar resolver sindicato dos SAMP_DEP
+            # cruzando os CPFs dos funcionários com os boletos já identificados
+            _resolver_sindicato_dep(info["samp_boletos"], info["samp_dep"], log)
             samp_res = consolidar_samp(info["samp_boletos"], dom_df)
+
             for b in samp_res["boletos"]:
                 fname = nome_arquivo_samp(b["sindicato"], b["tipo"], b["valor_total"])
                 emp_dir[fname] = gerar_xlsx_samp_boleto(b)
@@ -331,6 +342,56 @@ def processar_uploads(uploads: list, modelos: Optional[dict] = None) -> dict:
 def _empresa_por_pasta_arquivo(pasta: str, nome: str) -> Optional[str]:
     """Detecta empresa pela pasta-pai (caso seja claro: 'ATIVA/saude.xls')."""
     return empresa_por_nome(pasta) or empresa_por_nome(nome)
+
+def _resolver_sindicato_dep(todos_boletos: list, boletos_dep: list, log: list) -> None:
+    """
+    Para cada 'Controle de Pagamentos' sem sindicato definido, cruza os CPFs
+    dos funcionários titulares com os boletos SAMP_FUNC já identificados.
+    """
+    mapa = {}
+    for b in todos_boletos:
+        sind = b.get("sindicato")
+        if not sind or sind == "DESCONHECIDO":
+            continue
+        df = b.get("df")
+        if df is None or df.empty:
+            continue
+        cpf_col = None
+        for c in ("CPF", "CPF Funcionário", "CPF Funcionario"):
+            if c in df.columns:
+                cpf_col = c
+                break
+        if not cpf_col:
+            continue
+        for cpf in df[cpf_col].dropna().astype(str):
+            if cpf.strip():
+                mapa[cpf.strip()] = sind
+
+    if not mapa:
+        return
+
+    for b in boletos_dep:
+        if b.get("sindicato") and b["sindicato"] != "DESCONHECIDO":
+            continue
+        df = b.get("df")
+        if df is None or df.empty:
+            continue
+        cpf_col = None
+        for c in ("CPF Funcionário", "CPF Funcionario", "CPF"):
+            if c in df.columns:
+                cpf_col = c
+                break
+        if not cpf_col:
+            continue
+        contagem = {}
+        for cpf in df[cpf_col].dropna().astype(str):
+            cpf = cpf.strip()
+            if cpf in mapa:
+                contagem[mapa[cpf]] = contagem.get(mapa[cpf], 0) + 1
+        if contagem:
+            sind_majoritario = max(contagem.items(), key=lambda x: x[1])[0]
+            b["sindicato"] = sind_majoritario
+            log.append(f"🔍 SAMP DEP resolvido por CPF → {sind_majoritario} ({contagem[sind_majoritario]} matches)")
 
 
 def _gerar_resumo(estrutura: dict, dados_ccusto: dict) -> dict:
